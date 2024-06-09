@@ -89,3 +89,4 @@ lint/tmp/
 /.idea/migrations.xml
 /.idea/misc.xml
 /.idea/runConfigurations.xml
+/.idea/kotlinc.xml

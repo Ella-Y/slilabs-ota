@@ -23,6 +23,8 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
@@ -30,8 +32,10 @@ import androidx.core.content.ContextCompat;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.UUID;
@@ -75,6 +79,15 @@ public class OtaActivity extends AppCompatActivity {
 
     private HashMap<String, ProgressBar> progressMap = new HashMap<>();
 
+    private ActivityResultLauncher<Intent> launcherFileChooser = registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+        if (result.getResultCode() == RESULT_OK) {
+            Intent i = result.getData();
+            if (i != null && i.getData() != null) {
+                PrepareFile(i.getData());
+            }
+        }
+    });
+
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -95,12 +108,10 @@ public class OtaActivity extends AppCompatActivity {
         progressMap.put(State.Disconnecting, findViewById(R.id.disconnectingProgress));
         SetProgress(State.Ready);
         browseFileButton.setOnClickListener(view -> {
-            if (CheckChooseFilePermission()) {
-                Intent chooseFile = new Intent(Intent.ACTION_GET_CONTENT);
-                chooseFile.setType("*/*");
-                chooseFile = Intent.createChooser(chooseFile, "Choose a file");
-                startActivityForResult(chooseFile, PICKFILE_REQUESTCODE);
-            }
+            Intent chooseFile = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            chooseFile.setType("*/*");
+            chooseFile.addCategory(Intent.CATEGORY_OPENABLE);
+            launcherFileChooser.launch(chooseFile);
         });
 
         startOtaButton.setOnClickListener(v -> {
@@ -394,29 +405,35 @@ public class OtaActivity extends AppCompatActivity {
     }
 
     private boolean CheckBlePermissions() {
-        if (ContextCompat.checkSelfPermission(
-                OtaActivity.this,
-                Manifest.permission.BLUETOOTH)
-                == PackageManager.PERMISSION_DENIED
-                ||
-                ContextCompat.checkSelfPermission(
-                        OtaActivity.this,
-                        Manifest.permission.ACCESS_FINE_LOCATION)
-                        == PackageManager.PERMISSION_DENIED
 
-        ) {
-            ActivityCompat
-                    .requestPermissions(
-                            OtaActivity.this,
-                            new String[]{Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.BLUETOOTH},
-                            BLE_PERMISSIO_REQUSETCODE);
-            return false;
+        ArrayList<String> permissions = new ArrayList<>();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissions.add(Manifest.permission.BLUETOOTH_SCAN);
+            permissions.add(Manifest.permission.BLUETOOTH_CONNECT);
+            permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION);
+            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION);
         } else {
-            return true;
+            permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION);
+            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION);
         }
+
+        String[] notGranted = getNotGranted(permissions);
+        return notGranted.length == 0;
+
+    }
+
+    private String[] getNotGranted(List<String> permissions){
+        ArrayList<String> list = new ArrayList<>();
+        for (String item : permissions){
+            if(ContextCompat.checkSelfPermission(this, item) == PackageManager.PERMISSION_DENIED){
+                list.add(item);
+            }
+        }
+        return list.toArray(new String[0]);
     }
 
     private boolean CheckChooseFilePermission() {
+
         if (ContextCompat.checkSelfPermission(
                 OtaActivity.this,
                 Manifest.permission.READ_EXTERNAL_STORAGE)
