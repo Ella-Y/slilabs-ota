@@ -18,7 +18,6 @@ import android.os.Bundle
 import android.os.Handler
 import android.provider.Settings
 import android.provider.Settings.SettingNotFoundException
-import android.text.TextUtils
 import android.util.Log
 import android.view.View
 import android.widget.Button
@@ -28,13 +27,17 @@ import android.widget.Toast
 import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.util.Arrays
 import java.util.Locale
 import java.util.Timer
-import java.util.TimerTask
 import java.util.UUID
 
 @SuppressLint("MissingPermission")
@@ -48,7 +51,6 @@ class OtaActivity : AppCompatActivity() {
     private var connectionTimeout: Timer? = null
     private var device: BluetoothDevice? = null
     private var deviceName: String? = null
-    private var handler: Handler? = null
     private val MTU = 247
     private var firmwareFile: ByteArray? = null
     private var index = 0
@@ -78,7 +80,6 @@ class OtaActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_ota)
-        handler = Handler()
         browseFileButton = findViewById(R.id.browseFile)
         startOtaButton = findViewById(R.id.startOta)
         macAddressTextView = findViewById(R.id.macAddress)
@@ -112,18 +113,21 @@ class OtaActivity : AppCompatActivity() {
         SetProgress(State.Connecting)
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         mBluetoothAdapter = bluetoothManager.adapter
-        connectionTimeout = Timer()
+        device = mBluetoothAdapter!!.getRemoteDevice(macAddress)
+        var gatt: BluetoothGatt? = null
 
-        //create timer for connection timeout
-        connectionTimeout!!.schedule(object : TimerTask() {
-            override fun run() {
+        val connectionTimeoutJob = CoroutineScope(Dispatchers.IO).launch {
+            delay(CONNECT_TIMEOUT)
+            gatt?.disconnect()
+            gatt?.close()
+
+            withContext(Dispatchers.Main) {
                 ToastMessage("Connection timeout, make sure you write mac address correct and ble device is discoverable")
             }
-        }, CONNECT_TIMEOUT)
-        device = mBluetoothAdapter!!.getRemoteDevice(macAddress)
+        }
 
         // Here we are connecting to target device
-        device.connectGatt(applicationContext, false, object : BluetoothGattCallback() {
+        gatt = device!!.connectGatt(applicationContext, false, object : BluetoothGattCallback() {
             override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
                 Log.i("OTA", "state $newState")
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
@@ -132,8 +136,7 @@ class OtaActivity : AppCompatActivity() {
                         "Connected " + gatt.device.getName() + " address: " + gatt.device.getAddress()
                     )
                     deviceName = gatt.device.getName()
-                    connectionTimeout!!.cancel()
-                    connectionTimeout!!.purge()
+                    connectionTimeoutJob.cancel()
                     gatt.discoverServices() // Directly discovering services
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                     Log.i("OTA", "Disconnecting ")
@@ -169,12 +172,13 @@ class OtaActivity : AppCompatActivity() {
                 }
             }
         })
+
     }
 
     private fun ResetDFU(gatt: BluetoothGatt) {
         SetProgress(State.ResetDFU)
         //Writing 0x00 to control characteristic to reboot target device into DFU mode
-        handler!!.post {
+        CoroutineScope(Dispatchers.IO).launch {
             Log.i("OTA", "OTA RESET INTO DFU")
             val service = gatt.getService(OTA_SERVICE)
             val characteristic = service.getCharacteristic(OTA_CONTROL_CHARACTERISTIC)
@@ -193,23 +197,25 @@ class OtaActivity : AppCompatActivity() {
         SetProgress(State.OtaBegin)
 
         //Writing 0x00 to control characteristic to DFU mode  target device begins OTA process
-        handler!!.postDelayed({
+        CoroutineScope(Dispatchers.IO).launch {
+            delay(500)
             val service = gatt.getService(OTA_SERVICE)
             val characteristic = service.getCharacteristic(OTA_CONTROL_CHARACTERISTIC)
             characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
             characteristic.setValue(byteArrayOf(0x00))
             gatt.writeCharacteristic(characteristic)
-        }, 500)
+        }
     }
 
     private fun OtaUpload(gatt: BluetoothGatt) {
         SetProgress(State.OtaUpload)
         ToastMessage("Uploading!")
         index = 0
-        Thread {
+        val firmwareFile = firmwareFile!!
+        CoroutineScope(Dispatchers.IO).launch {
             var last = false
             var packageCount = 0
-            while (!last) {
+            while (!last && isActive) {
                 var payload: ByteArray? = ByteArray(MTU)
                 if (index + MTU >= firmwareFile.size) {
                     val restSize = firmwareFile.size - index
@@ -223,36 +229,39 @@ class OtaActivity : AppCompatActivity() {
                 characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
                 characteristic.setValue(payload)
                 Log.d("OTA", "index :" + index + " firmware lenght:" + firmwareFile.size)
-                while (!gatt.writeCharacteristic(characteristic)) { // attempt to write until getting success
-                    try {
-                        Thread.sleep(5)
-                    } catch (e: InterruptedException) {
-                        e.printStackTrace()
-                    }
+
+                // attempt to write until getting success
+                while (!gatt.writeCharacteristic(characteristic) && isActive) {
+                    delay(5)
                 }
-                packageCount = packageCount + 1
-                index = index + MTU
+
+                packageCount += 1
+                index += MTU
             }
             Log.i("OTA", "OTA UPLOAD SEND DONE")
             OtaEnd(gatt)
-        }.start()
+        }
     }
 
-    private fun OtaEnd(gatt: BluetoothGatt) {
-        SetProgress(State.OtaEnd)
-        handler!!.postDelayed({
-            Log.i("OTA", "OTA END")
-            val endCharacteristic = gatt.getService(OTA_SERVICE).getCharacteristic(
-                OTA_CONTROL_CHARACTERISTIC
-            )
-            endCharacteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-            endCharacteristic.setValue(byteArrayOf(0x03))
-            var i = 0
-            while (!gatt.writeCharacteristic(endCharacteristic)) {
-                i++
-                Log.i("OTA", "Failed to write end 0x03 retry:$i")
+    private suspend fun OtaEnd(gatt: BluetoothGatt) {
+        withContext(Dispatchers.Main){
+            SetProgress(State.OtaEnd)
+        }
+
+        delay(1500)
+        Log.i("OTA", "OTA END")
+        val endCharacteristic = gatt.getService(OTA_SERVICE).getCharacteristic(
+            OTA_CONTROL_CHARACTERISTIC
+        )
+        endCharacteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        endCharacteristic.setValue(byteArrayOf(0x03))
+
+        for (i in 0 until 5){
+            if (gatt.writeCharacteristic(endCharacteristic)) {
+                break
             }
-        }, 1500)
+            Log.i("OTA", "Failed to write end 0x03 retry:$i")
+        }
     }
 
 
@@ -263,12 +272,12 @@ class OtaActivity : AppCompatActivity() {
             gatt.disconnect()
         }
         device = mBluetoothAdapter!!.getRemoteDevice(macAddress)
-        device.connectGatt(this@OtaActivity, false, object : BluetoothGattCallback() {
+        device!!.connectGatt(this@OtaActivity, false, object : BluetoothGattCallback() {
             // This is OTA devices callback
             override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
                     //Here, we are connected to target device which is in DFU mode
-                    deviceName = device.getName()
+                    deviceName = gatt.device.getName()
                     gatt.discoverServices() // Directly discovering services
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                     Log.i("OTA", "Disconnecting ")
@@ -283,14 +292,6 @@ class OtaActivity : AppCompatActivity() {
                     //We have connected to device and discovered services
                     OtaBegin(gatt)
                 }
-            }
-
-            override fun onCharacteristicRead(
-                gatt: BluetoothGatt,
-                characteristic: BluetoothGattCharacteristic,
-                status: Int
-            ) {
-                super.onCharacteristicRead(gatt, characteristic, status)
             }
 
             override fun onCharacteristicWrite(
@@ -326,13 +327,14 @@ class OtaActivity : AppCompatActivity() {
     }
 
     private fun RebootTargetDevice(gatt: BluetoothGatt) {
-        handler!!.postDelayed({
+        CoroutineScope(Dispatchers.IO).launch {
+            delay(500)
             val service = gatt.getService(OTA_SERVICE)
             val characteristic = service.getCharacteristic(OTA_CONTROL_CHARACTERISTIC)
             characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
             characteristic.setValue(byteArrayOf(0x04))
             gatt.writeCharacteristic(characteristic)
-        }, 500)
+        }
     }
 
     private fun ConnectDelayedForOTA(gatt: BluetoothGatt) {
@@ -340,10 +342,11 @@ class OtaActivity : AppCompatActivity() {
 
         //after writing 0x00 to target device device will reboot into DFU mode
         //We are waiting a little bit just to be sure
-        handler!!.postDelayed({
+        CoroutineScope(Dispatchers.IO).launch {
+            delay(5000)
             Log.i("OTA", "CONNECTING FOR OTA")
             ConnectOtaDevice(gatt)
-        }, 5000)
+        }
     }
 
     private fun ToastMessage(message: String?) {
@@ -397,7 +400,7 @@ class OtaActivity : AppCompatActivity() {
             permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
         }
         val notGranted = getNotGranted(permissions)
-        return notGranted.size == 0
+        return notGranted.isEmpty()
     }
 
     private fun getNotGranted(permissions: List<String>): Array<String> {
