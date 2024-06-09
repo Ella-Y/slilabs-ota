@@ -1,537 +1,486 @@
-package com.sensemore.slilabs.ota;
+package com.sensemore.slilabs.ota
 
-import android.Manifest;
-import android.bluetooth.BluetoothAdapter;
-import android.bluetooth.BluetoothDevice;
-import android.bluetooth.BluetoothGatt;
-import android.bluetooth.BluetoothGattCallback;
-import android.bluetooth.BluetoothGattCharacteristic;
-import android.bluetooth.BluetoothGattService;
-import android.bluetooth.BluetoothProfile;
-import android.content.Intent;
-import android.content.pm.PackageManager;
-import android.net.Uri;
-import android.os.Build;
-import android.os.Bundle;
-import android.os.Handler;
-import android.provider.Settings;
-import android.text.TextUtils;
-import android.util.Log;
-import android.view.View;
-import android.widget.Button;
-import android.widget.ProgressBar;
-import android.widget.TextView;
-import android.widget.Toast;
+import android.Manifest
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.provider.Settings
+import android.provider.Settings.SettingNotFoundException
+import android.text.TextUtils
+import android.util.Log
+import android.view.View
+import android.widget.Button
+import android.widget.ProgressBar
+import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.result.ActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import java.io.IOException
+import java.util.Arrays
+import java.util.Locale
+import java.util.Timer
+import java.util.TimerTask
+import java.util.UUID
 
-import androidx.activity.result.ActivityResultLauncher;
-import androidx.activity.result.contract.ActivityResultContracts;
-import androidx.annotation.NonNull;
-import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.app.ActivityCompat;
-import androidx.core.content.ContextCompat;
+@SuppressLint("MissingPermission")
+class OtaActivity : AppCompatActivity() {
+    private var browseFileButton: Button? = null
+    private var startOtaButton: Button? = null
+    private var macAddressTextView: TextView? = null
+    private var fileNameTextView: TextView? = null
+    private var mBluetoothAdapter: BluetoothAdapter? = null
+    private var macAddress: String? = null
+    private var connectionTimeout: Timer? = null
+    private var device: BluetoothDevice? = null
+    private var deviceName: String? = null
+    private var handler: Handler? = null
+    private val MTU = 247
+    private var firmwareFile: ByteArray? = null
+    private var index = 0
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Timer;
-import java.util.TimerTask;
-import java.util.UUID;
-
-public class OtaActivity extends AppCompatActivity {
-
-    private static UUID OTA_CONTROL_CHARACTERISTIC = UUID.fromString("F7BF3564-FB6D-4E53-88A4-5E37E0326063");
-    private static UUID OTA_DATA_CHARACTERISTIC = UUID.fromString("984227F3-34FC-4045-A5D0-2C581F81A153");
-    public static UUID OTA_SERVICE = UUID.fromString("1d14d6ee-fd63-4fa1-bfa4-8f47b42119f0");
-
-    private static final int PICKFILE_REQUESTCODE = 1;
-    private static final int BLE_PERMISSIO_REQUSETCODE = 3;
-    private static final int READ_EXTERNAL_STORAGE_REQUESTCODE = 2;
-    private static final long CONNECT_TIMEOUT = 10000;
-
-    private Button browseFileButton;
-    private Button startOtaButton;
-    private TextView macAddressTextView;
-    private TextView fileNameTextView;
-
-    private BluetoothAdapter mBluetoothAdapter;
-    private String macAddress;
-    private Timer connectionTimeout;
-    private BluetoothDevice device;
-    private String deviceName;
-    private Handler handler;
-    private int MTU = 247;
-    private byte[] firmwareFile;
-    private int index;
-
-    class State {
-        public static final String Connecting = "Connecting";
-        public static final String ResetDFU = "ResetDFU";
-        public static final String Reconnecting = "Reconnecting";
-        public static final String OtaBegin = "Ota Begin";
-        public static final String OtaUpload = "OtaUpload";
-        public static final String OtaEnd = "OtaEnd";
-        public static final String Disconnecting = "Disconnecting";
-        public static final String Ready = "Ready";
+    internal object State {
+        const val Connecting = "Connecting"
+        const val ResetDFU = "ResetDFU"
+        const val Reconnecting = "Reconnecting"
+        const val OtaBegin = "Ota Begin"
+        const val OtaUpload = "OtaUpload"
+        const val OtaEnd = "OtaEnd"
+        const val Disconnecting = "Disconnecting"
+        const val Ready = "Ready"
     }
 
-    private HashMap<String, ProgressBar> progressMap = new HashMap<>();
-
-    private ActivityResultLauncher<Intent> launcherFileChooser = registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
-        if (result.getResultCode() == RESULT_OK) {
-            Intent i = result.getData();
-            if (i != null && i.getData() != null) {
-                PrepareFile(i.getData());
+    private val progressMap = HashMap<String, ProgressBar?>()
+    private val launcherFileChooser =
+        registerForActivityResult<Intent, ActivityResult>(ActivityResultContracts.StartActivityForResult()) { result: ActivityResult ->
+            if (result.resultCode == RESULT_OK) {
+                val i = result.data
+                if (i != null && i.data != null) {
+                    PrepareFile(i.data)
+                }
             }
         }
-    });
 
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_ota)
+        handler = Handler()
+        browseFileButton = findViewById(R.id.browseFile)
+        startOtaButton = findViewById(R.id.startOta)
+        macAddressTextView = findViewById(R.id.macAddress)
+        fileNameTextView = findViewById(R.id.fileName)
+        progressMap[State.Connecting] = findViewById(R.id.connectingProgress)
+        progressMap[State.ResetDFU] = findViewById(R.id.resetDFUProgress)
+        progressMap[State.Reconnecting] = findViewById(R.id.reconnectingProgress)
+        progressMap[State.OtaBegin] = findViewById(R.id.otaBeginProgress)
+        progressMap[State.OtaUpload] = findViewById(R.id.otaUploadProgress)
+        progressMap[State.OtaEnd] = findViewById(R.id.otaEndProgress)
+        progressMap[State.Disconnecting] = findViewById(R.id.disconnectingProgress)
+        SetProgress(State.Ready)
 
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        setContentView(R.layout.activity_ota);
-        handler = new Handler();
-        browseFileButton = findViewById(R.id.browseFile);
-        startOtaButton = findViewById(R.id.startOta);
-        macAddressTextView = findViewById(R.id.macAddress);
-        fileNameTextView = findViewById(R.id.fileName);
+        browseFileButton!!.setOnClickListener {
+            val chooseFile = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            chooseFile.setType("*/*")
+            chooseFile.addCategory(Intent.CATEGORY_OPENABLE)
+            launcherFileChooser.launch(chooseFile)
+        }
 
-        progressMap.put(State.Connecting, findViewById(R.id.connectingProgress));
-        progressMap.put(State.ResetDFU, findViewById(R.id.resetDFUProgress));
-        progressMap.put(State.Reconnecting, findViewById(R.id.reconnectingProgress));
-        progressMap.put(State.OtaBegin, findViewById(R.id.otaBeginProgress));
-        progressMap.put(State.OtaUpload, findViewById(R.id.otaUploadProgress));
-        progressMap.put(State.OtaEnd, findViewById(R.id.otaEndProgress));
-        progressMap.put(State.Disconnecting, findViewById(R.id.disconnectingProgress));
-        SetProgress(State.Ready);
-        browseFileButton.setOnClickListener(view -> {
-            Intent chooseFile = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-            chooseFile.setType("*/*");
-            chooseFile.addCategory(Intent.CATEGORY_OPENABLE);
-            launcherFileChooser.launch(chooseFile);
-        });
-
-        startOtaButton.setOnClickListener(v -> {
+        startOtaButton!!.setOnClickListener {
             if (CheckBlePermissions() && CheckBluetoothEnabled() && CheckLocationEnabled() && CheckMacAddress()) {
-
-                Toast.makeText(getApplicationContext(), "BEGIN", Toast.LENGTH_SHORT).show();
-                ConnectDevice();
+                Toast.makeText(applicationContext, "BEGIN", Toast.LENGTH_SHORT).show()
+                ConnectDevice()
             }
-        });
+        }
     }
 
 
-    private void ConnectDevice() {
-        SetProgress(State.Connecting);
-        mBluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
-        connectionTimeout = new Timer();
+    private fun ConnectDevice() {
+        SetProgress(State.Connecting)
+        val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+        mBluetoothAdapter = bluetoothManager.adapter
+        connectionTimeout = Timer()
 
         //create timer for connection timeout
-        connectionTimeout.schedule(new TimerTask() {
-            @Override
-            public void run() {
-                ToastMessage("Connection timeout, make sure you write mac address correct and ble device is discoverable");
+        connectionTimeout!!.schedule(object : TimerTask() {
+            override fun run() {
+                ToastMessage("Connection timeout, make sure you write mac address correct and ble device is discoverable")
             }
-        }, CONNECT_TIMEOUT);
-        device = mBluetoothAdapter.getRemoteDevice(macAddress);
+        }, CONNECT_TIMEOUT)
+        device = mBluetoothAdapter!!.getRemoteDevice(macAddress)
 
         // Here we are connecting to target device
-        device.connectGatt(getApplicationContext(), false, new BluetoothGattCallback() {
-            @Override
-            public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
-                Log.i("OTA", "state " + newState);
+        device.connectGatt(applicationContext, false, object : BluetoothGattCallback() {
+            override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+                Log.i("OTA", "state $newState")
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    Log.i("OTA", "Connected " + device.getName() + " address: " + device.getAddress());
-                    deviceName = device.getName();
-                    connectionTimeout.cancel();
-                    connectionTimeout.purge();
-                    gatt.discoverServices(); // Directly discovering services
+                    Log.i(
+                        "OTA",
+                        "Connected " + gatt.device.getName() + " address: " + gatt.device.getAddress()
+                    )
+                    deviceName = gatt.device.getName()
+                    connectionTimeout!!.cancel()
+                    connectionTimeout!!.purge()
+                    gatt.discoverServices() // Directly discovering services
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                    Log.i("OTA", "Disconnecting ");
-                    gatt.close();
-                    gatt.disconnect();
+                    Log.i("OTA", "Disconnecting ")
+                    gatt.close()
+                    gatt.disconnect()
                 }
             }
 
-            @Override
-            public void onServicesDiscovered(BluetoothGatt gatt, int status) {
+            override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
-                    Log.i("OTA", "onServicesDiscovered deviceName: " + deviceName);
+                    Log.i("OTA", "onServicesDiscovered deviceName: $deviceName")
                     //We have connected to device and discovered services
                     //if OTA_SERVICE has OTA_DATA_CHARACTERISTIC target device already in dfu mode
-                    if (gatt.getService(OTA_SERVICE).getCharacteristic(OTA_DATA_CHARACTERISTIC) != null) {
-                        ConnectOtaDevice(gatt);
+                    if (gatt.getService(OTA_SERVICE)
+                            .getCharacteristic(OTA_DATA_CHARACTERISTIC) != null
+                    ) {
+                        ConnectOtaDevice(gatt)
                     } else {
-                        ResetDFU(gatt);
+                        ResetDFU(gatt)
                     }
                 }
             }
 
-            @Override
-            public void onCharacteristicWrite(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
-                Log.i("OTA", "onCharacteristicWrite " + characteristic.getUuid().toString());
-                if (characteristic.getUuid().equals(OTA_CONTROL_CHARACTERISTIC) && characteristic.getValue()[0] == 0x00) {
+            override fun onCharacteristicWrite(
+                gatt: BluetoothGatt,
+                characteristic: BluetoothGattCharacteristic,
+                status: Int
+            ) {
+                Log.i("OTA", "onCharacteristicWrite " + characteristic.uuid.toString())
+                if (characteristic.uuid == OTA_CONTROL_CHARACTERISTIC && characteristic.value[0].toInt() == 0x00) {
                     //target device ´rebooting into OTA
-                    ConnectDelayedForOTA(gatt);//reconnect
+                    ConnectDelayedForOTA(gatt) //reconnect
                 }
-
             }
-        });
+        })
     }
 
-    private void ResetDFU(BluetoothGatt gatt) {
-        SetProgress(State.ResetDFU);
+    private fun ResetDFU(gatt: BluetoothGatt) {
+        SetProgress(State.ResetDFU)
         //Writing 0x00 to control characteristic to reboot target device into DFU mode
-        handler.post(() -> {
-            Log.i("OTA", "OTA RESET INTO DFU");
-            BluetoothGattService service = gatt.getService(OTA_SERVICE);
-            BluetoothGattCharacteristic characteristic = service.getCharacteristic(OTA_CONTROL_CHARACTERISTIC);
-            characteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
-            characteristic.setValue(new byte[]{0x00});
-            gatt.writeCharacteristic(characteristic);// result will be handled in onCharacteristicWrite callback of gatt.
-        });
+        handler!!.post {
+            Log.i("OTA", "OTA RESET INTO DFU")
+            val service = gatt.getService(OTA_SERVICE)
+            val characteristic = service.getCharacteristic(OTA_CONTROL_CHARACTERISTIC)
+            characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            characteristic.setValue(byteArrayOf(0x00))
+            gatt.writeCharacteristic(characteristic) // result will be handled in onCharacteristicWrite callback of gatt.
+        }
     }
 
-    private void RequestMTU(BluetoothGatt gatt) {
-        gatt.requestMtu(MTU+3);
-    }//I dunno why but we neet to request 3 more for what required :/
 
-    private void OtaBegin(BluetoothGatt gatt) {
-        SetProgress(State.OtaBegin);
+    private fun RequestMTU(gatt: BluetoothGatt) {
+        gatt.requestMtu(MTU + 3)
+    } //I dunno why but we neet to request 3 more for what required :/
+
+    private fun OtaBegin(gatt: BluetoothGatt) {
+        SetProgress(State.OtaBegin)
 
         //Writing 0x00 to control characteristic to DFU mode  target device begins OTA process
-        handler.postDelayed(() -> {
-            BluetoothGattService service = gatt.getService(OTA_SERVICE);
-            BluetoothGattCharacteristic characteristic = service.getCharacteristic(OTA_CONTROL_CHARACTERISTIC);
-            characteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
-            characteristic.setValue(new byte[]{0x00});
-            gatt.writeCharacteristic(characteristic);
-        }, 500);
+        handler!!.postDelayed({
+            val service = gatt.getService(OTA_SERVICE)
+            val characteristic = service.getCharacteristic(OTA_CONTROL_CHARACTERISTIC)
+            characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            characteristic.setValue(byteArrayOf(0x00))
+            gatt.writeCharacteristic(characteristic)
+        }, 500)
     }
 
-    private void OtaUpload(BluetoothGatt gatt) {
-        SetProgress(State.OtaUpload);
-
-        ToastMessage("Uploading!");
-
-        index = 0;
-        new Thread(() -> {
-
-            boolean last = false;
-            int packageCount = 0;
+    private fun OtaUpload(gatt: BluetoothGatt) {
+        SetProgress(State.OtaUpload)
+        ToastMessage("Uploading!")
+        index = 0
+        Thread {
+            var last = false
+            var packageCount = 0
             while (!last) {
-                byte[] payload = new byte[MTU];
-                if (index + MTU >= firmwareFile.length) {
-                    int restSize = firmwareFile.length - index;
-                    System.arraycopy(firmwareFile, index, payload, 0, restSize); //copy rest bytes
-                    last = true;
+                var payload: ByteArray? = ByteArray(MTU)
+                if (index + MTU >= firmwareFile.size) {
+                    val restSize = firmwareFile.size - index
+                    System.arraycopy(firmwareFile, index, payload, 0, restSize) //copy rest bytes
+                    last = true
                 } else {
-                    payload = Arrays.copyOfRange(firmwareFile, index, index + MTU);
+                    payload = Arrays.copyOfRange(firmwareFile, index, index + MTU)
                 }
-                BluetoothGattService service = gatt.getService(OTA_SERVICE);
-                BluetoothGattCharacteristic characteristic = service.getCharacteristic(OTA_DATA_CHARACTERISTIC);
-                characteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE);
-                characteristic.setValue(payload);
-                Log.d("OTA", "index :" + index + " firmware lenght:" + firmwareFile.length);
+                val service = gatt.getService(OTA_SERVICE)
+                val characteristic = service.getCharacteristic(OTA_DATA_CHARACTERISTIC)
+                characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                characteristic.setValue(payload)
+                Log.d("OTA", "index :" + index + " firmware lenght:" + firmwareFile.size)
                 while (!gatt.writeCharacteristic(characteristic)) { // attempt to write until getting success
                     try {
-                        Thread.sleep(5);
-                    } catch (InterruptedException e) {
-                        e.printStackTrace();
+                        Thread.sleep(5)
+                    } catch (e: InterruptedException) {
+                        e.printStackTrace()
                     }
                 }
-
-                packageCount = packageCount + 1;
-                index = index + MTU;
+                packageCount = packageCount + 1
+                index = index + MTU
             }
-            Log.i("OTA", "OTA UPLOAD SEND DONE");
-            OtaEnd(gatt);
-        }).start();
+            Log.i("OTA", "OTA UPLOAD SEND DONE")
+            OtaEnd(gatt)
+        }.start()
     }
 
-    private void OtaEnd(BluetoothGatt gatt) {
-        SetProgress(State.OtaEnd);
-
-        handler.postDelayed(() -> {
-            Log.i("OTA", "OTA END");
-            BluetoothGattCharacteristic endCharacteristic = gatt.getService(OTA_SERVICE).getCharacteristic(OTA_CONTROL_CHARACTERISTIC);
-            endCharacteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
-            endCharacteristic.setValue(new byte[]{0x03});
-            int i = 0;
+    private fun OtaEnd(gatt: BluetoothGatt) {
+        SetProgress(State.OtaEnd)
+        handler!!.postDelayed({
+            Log.i("OTA", "OTA END")
+            val endCharacteristic = gatt.getService(OTA_SERVICE).getCharacteristic(
+                OTA_CONTROL_CHARACTERISTIC
+            )
+            endCharacteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            endCharacteristic.setValue(byteArrayOf(0x03))
+            var i = 0
             while (!gatt.writeCharacteristic(endCharacteristic)) {
-                i++;
-                Log.i("OTA", "Failed to write end 0x03 retry:" + i);
+                i++
+                Log.i("OTA", "Failed to write end 0x03 retry:$i")
             }
-        }, 1500);
+        }, 1500)
     }
 
-    private void ConnectOtaDevice(BluetoothGatt gatt) {
 
+
+    private fun ConnectOtaDevice(gatt: BluetoothGatt?) {
         if (gatt != null) {
-            gatt.close();
-            gatt.disconnect();
+            gatt.close()
+            gatt.disconnect()
         }
-        device = mBluetoothAdapter.getRemoteDevice(macAddress);
-        device.connectGatt(OtaActivity.this, false, new BluetoothGattCallback() {
+        device = mBluetoothAdapter!!.getRemoteDevice(macAddress)
+        device.connectGatt(this@OtaActivity, false, object : BluetoothGattCallback() {
             // This is OTA devices callback
-            @Override
-            public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
+            override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
                     //Here, we are connected to target device which is in DFU mode
-                    deviceName = device.getName();
-                    gatt.discoverServices(); // Directly discovering services
+                    deviceName = device.getName()
+                    gatt.discoverServices() // Directly discovering services
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                    Log.i("OTA", "Disconnecting ");
-                    gatt.close();
-                    gatt.disconnect();
+                    Log.i("OTA", "Disconnecting ")
+                    gatt.close()
+                    gatt.disconnect()
                 }
             }
 
-            @Override
-            public void onServicesDiscovered(BluetoothGatt gatt, int status) {
+            override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
-                    Log.i("OTA", "onServicesDiscovered deviceName: " + deviceName);
+                    Log.i("OTA", "onServicesDiscovered deviceName: $deviceName")
                     //We have connected to device and discovered services
-                    OtaBegin(gatt);
-
+                    OtaBegin(gatt)
                 }
             }
 
-            @Override
-            public void onCharacteristicRead(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
-                super.onCharacteristicRead(gatt, characteristic, status);
+            override fun onCharacteristicRead(
+                gatt: BluetoothGatt,
+                characteristic: BluetoothGattCharacteristic,
+                status: Int
+            ) {
+                super.onCharacteristicRead(gatt, characteristic, status)
             }
 
-            @Override
-            public void onCharacteristicWrite(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
-                Log.i("OTA", "onCharacteristicWrite " + characteristic.getUuid().toString());
-                if (characteristic.getUuid().equals(OTA_CONTROL_CHARACTERISTIC) && characteristic.getValue()[0] == 0x00) {
+            override fun onCharacteristicWrite(
+                gatt: BluetoothGatt,
+                characteristic: BluetoothGattCharacteristic,
+                status: Int
+            ) {
+                Log.i("OTA", "onCharacteristicWrite " + characteristic.uuid.toString())
+                if (characteristic.uuid == OTA_CONTROL_CHARACTERISTIC && characteristic.value[0].toInt() == 0x00) {
                     //OTA Begin written
-                    RequestMTU(gatt);// will be handled in onMtuChanged callback of gatt
-                } else if (characteristic.getUuid().equals(OTA_CONTROL_CHARACTERISTIC) && characteristic.getValue()[0] == 0x03) {
+                    RequestMTU(gatt) // will be handled in onMtuChanged callback of gatt
+                } else if (characteristic.uuid == OTA_CONTROL_CHARACTERISTIC && characteristic.value[0].toInt() == 0x03) {
                     //OTA End written
-                    SetProgress(State.Disconnecting);
-                    ToastMessage("Upload Done!");// will be handled in onMtuChanged callback of gatt
-                    RebootTargetDevice(gatt);
-                }
-                else if (characteristic.getUuid().equals(OTA_CONTROL_CHARACTERISTIC) && characteristic.getValue()[0] == 0x04) {
+                    SetProgress(State.Disconnecting)
+                    ToastMessage("Upload Done!") // will be handled in onMtuChanged callback of gatt
+                    RebootTargetDevice(gatt)
+                } else if (characteristic.uuid == OTA_CONTROL_CHARACTERISTIC && characteristic.value[0].toInt() == 0x04) {
                     //OTA End written
-                    SetProgress(State.Ready);
-                    ToastMessage("Upload Done!");// will be handled in onMtuChanged callback of gatt
+                    SetProgress(State.Ready)
+                    ToastMessage("Upload Done!") // will be handled in onMtuChanged callback of gatt
                 }
             }
 
-            @Override
-            public void onMtuChanged(BluetoothGatt gatt, int mtu, int status) {
-                super.onMtuChanged(gatt, mtu, status);
+            override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+                super.onMtuChanged(gatt, mtu, status)
                 if (status == BluetoothGatt.GATT_SUCCESS) {
-                    Log.i("OTA", "onMtuChanged mtu: " + mtu);
+                    Log.i("OTA", "onMtuChanged mtu: $mtu")
                     //We have successfully request MTU we can start upload process
-                    OtaUpload(gatt);
-
+                    OtaUpload(gatt)
                 }
             }
-        });
+        })
     }
 
-    private void RebootTargetDevice(BluetoothGatt gatt) {
-        handler.postDelayed(() -> {
-            BluetoothGattService service = gatt.getService(OTA_SERVICE);
-            BluetoothGattCharacteristic characteristic = service.getCharacteristic(OTA_CONTROL_CHARACTERISTIC);
-            characteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
-            characteristic.setValue(new byte[]{0x04});
-            gatt.writeCharacteristic(characteristic);
-        }, 500);
+    private fun RebootTargetDevice(gatt: BluetoothGatt) {
+        handler!!.postDelayed({
+            val service = gatt.getService(OTA_SERVICE)
+            val characteristic = service.getCharacteristic(OTA_CONTROL_CHARACTERISTIC)
+            characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            characteristic.setValue(byteArrayOf(0x04))
+            gatt.writeCharacteristic(characteristic)
+        }, 500)
     }
 
-
-    private void ConnectDelayedForOTA(BluetoothGatt gatt) {
-        SetProgress(State.Reconnecting);
+    private fun ConnectDelayedForOTA(gatt: BluetoothGatt) {
+        SetProgress(State.Reconnecting)
 
         //after writing 0x00 to target device device will reboot into DFU mode
         //We are waiting a little bit just to be sure
-        handler.postDelayed(() -> {
-            Log.i("OTA", "CONNECTING FOR OTA");
-            ConnectOtaDevice(gatt);
-        }, 5000);
-
+        handler!!.postDelayed({
+            Log.i("OTA", "CONNECTING FOR OTA")
+            ConnectOtaDevice(gatt)
+        }, 5000)
     }
 
-    private void ToastMessage(String message) {
-        runOnUiThread(() -> {
-            Toast.makeText(getApplicationContext(), message, Toast.LENGTH_SHORT).show();
-
-        });
+    private fun ToastMessage(message: String?) {
+        runOnUiThread { Toast.makeText(applicationContext, message, Toast.LENGTH_SHORT).show() }
     }
 
-    private void SetProgress(String state) {
-        runOnUiThread(() -> {
-            for (ProgressBar bar : progressMap.values()) {
-                bar.setVisibility(View.INVISIBLE);
+    private fun SetProgress(state: String) {
+        runOnUiThread {
+            for (bar in progressMap.values) {
+                bar!!.visibility = View.INVISIBLE
             }
-            if (progressMap.get(state) != null) {
-                progressMap.get(state).setVisibility(View.VISIBLE);
+            if (progressMap[state] != null) {
+                progressMap[state]!!.visibility = View.VISIBLE
             }
-        });
-    }
-
-
-    private boolean CheckMacAddress() {
-        macAddress = macAddressTextView.getText().toString().trim().toUpperCase();
-        if (BluetoothAdapter.checkBluetoothAddress(macAddress)) {
-            return true;
-        } else {
-            ToastMessage("Mac Address not valid");
-            return false;
         }
     }
 
-    private boolean CheckBluetoothEnabled() {
-        mBluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
-        if (mBluetoothAdapter == null) {
-            ToastMessage("Doesnt support bluetooth");
-            return false;
-        } else if (!mBluetoothAdapter.isEnabled()) {
-            ToastMessage("Please enable your bluetooth");
-            return false;
-
+    private fun CheckMacAddress(): Boolean {
+        macAddress =
+            macAddressTextView!!.text.toString().trim().uppercase(Locale.US)
+        return if (BluetoothAdapter.checkBluetoothAddress(macAddress)) {
+            true
         } else {
-            return true;
+            ToastMessage("Mac Address not valid")
+            false
         }
-
     }
 
-    private boolean CheckBlePermissions() {
+    private fun CheckBluetoothEnabled(): Boolean {
+        mBluetoothAdapter = BluetoothAdapter.getDefaultAdapter()
+        return if (mBluetoothAdapter == null) {
+            ToastMessage("Doesnt support bluetooth")
+            false
+        } else if (!mBluetoothAdapter!!.isEnabled) {
+            ToastMessage("Please enable your bluetooth")
+            false
+        } else {
+            true
+        }
+    }
 
-        ArrayList<String> permissions = new ArrayList<>();
+    private fun CheckBlePermissions(): Boolean {
+        val permissions = ArrayList<String>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            permissions.add(Manifest.permission.BLUETOOTH_SCAN);
-            permissions.add(Manifest.permission.BLUETOOTH_CONNECT);
-            permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION);
-            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION);
+            permissions.add(Manifest.permission.BLUETOOTH_SCAN)
+            permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
+            permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION)
+            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
         } else {
-            permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION);
-            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION);
+            permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION)
+            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
         }
-
-        String[] notGranted = getNotGranted(permissions);
-        return notGranted.length == 0;
-
+        val notGranted = getNotGranted(permissions)
+        return notGranted.size == 0
     }
 
-    private String[] getNotGranted(List<String> permissions){
-        ArrayList<String> list = new ArrayList<>();
-        for (String item : permissions){
-            if(ContextCompat.checkSelfPermission(this, item) == PackageManager.PERMISSION_DENIED){
-                list.add(item);
+    private fun getNotGranted(permissions: List<String>): Array<String> {
+        val list = ArrayList<String>()
+        for (item in permissions) {
+            if (ContextCompat.checkSelfPermission(this, item) == PackageManager.PERMISSION_DENIED) {
+                list.add(item)
             }
         }
-        return list.toArray(new String[0]);
+        return list.toTypedArray<String>()
     }
 
-    private boolean CheckChooseFilePermission() {
 
-        if (ContextCompat.checkSelfPermission(
-                OtaActivity.this,
-                Manifest.permission.READ_EXTERNAL_STORAGE)
-                == PackageManager.PERMISSION_DENIED) {
-            ActivityCompat
-                    .requestPermissions(
-                            OtaActivity.this,
-                            new String[]{Manifest.permission.READ_EXTERNAL_STORAGE},
-                            READ_EXTERNAL_STORAGE_REQUESTCODE);
-            return false;
+    fun CheckLocationEnabled(): Boolean {
+        var locationMode = 0
+        locationMode = try {
+            Settings.Secure.getInt(this.contentResolver, Settings.Secure.LOCATION_MODE)
+        } catch (e: SettingNotFoundException) {
+            e.printStackTrace()
+            ToastMessage("Doesn't support location")
+            return false
+        }
+        if (locationMode == Settings.Secure.LOCATION_MODE_OFF) {
+            ToastMessage("Please enable location")
+            return false
         } else {
-            return true;
+            return true
         }
+
     }
 
-    public boolean CheckLocationEnabled() {
-        int locationMode = 0;
-        String locationProviders;
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
-            try {
-                locationMode = Settings.Secure.getInt(this.getContentResolver(), Settings.Secure.LOCATION_MODE);
-
-            } catch (Settings.SettingNotFoundException e) {
-                e.printStackTrace();
-                ToastMessage("Doesnt support location");
-                return false;
-
-            }
-            if (locationMode == Settings.Secure.LOCATION_MODE_OFF) {
-                ToastMessage("Please enable location");
-                return false;
-            } else {
-                return true;
-            }
-
-        } else {
-            locationProviders = Settings.Secure.getString(this.getContentResolver(), Settings.Secure.LOCATION_PROVIDERS_ALLOWED);
-            if (TextUtils.isEmpty(locationProviders)) {
-                ToastMessage("Please enable location");
-                return false;
-            } else {
-                return true;
-            }
-        }
-    }
-
-    private void PrepareFile(Uri uri) {
-        ToastMessage(uri.getLastPathSegment());
-        fileNameTextView.setText(uri.getLastPathSegment());
-        startOtaButton.setEnabled(true);
+    private fun PrepareFile(uri: Uri?) {
+        ToastMessage(uri!!.lastPathSegment)
+        fileNameTextView!!.text = uri.lastPathSegment
+        startOtaButton!!.isEnabled = true
         try {
-            InputStream in = getContentResolver().openInputStream(uri);
-
-            firmwareFile = new byte[in.available()];
-            in.read(firmwareFile, 0, in.available());
-            in.close();
-        } catch (IOException e) {
-            e.printStackTrace();
+            val `in` = contentResolver.openInputStream(uri)
+            firmwareFile = ByteArray(`in`!!.available())
+            `in`.read(firmwareFile, 0, `in`.available())
+            `in`.close()
+        } catch (e: IOException) {
+            e.printStackTrace()
         }
     }
 
-    @Override
-    public void onActivityResult(int requestCode, int resultCode, Intent data) {
-        if (resultCode == RESULT_OK) {
-            switch (requestCode) {
-                case PICKFILE_REQUESTCODE:
-                    PrepareFile(data.getData());
-                    break;
-            }
-        }
-        super.onActivityResult(requestCode, resultCode, data);
-    }
-
-    @Override
-    public void onRequestPermissionsResult(int requestCode,
-                                           @NonNull String[] permissions,
-                                           @NonNull int[] grantResults) {
-        super.onRequestPermissionsResult(requestCode,
-                permissions,
-                grantResults);
-
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(
+            requestCode,
+            permissions,
+            grantResults
+        )
         if (requestCode == READ_EXTERNAL_STORAGE_REQUESTCODE) {
-            if (grantResults.length > 0
-                    && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                browseFileButton.callOnClick();
+            if (grantResults.size > 0
+                && grantResults[0] == PackageManager.PERMISSION_GRANTED
+            ) {
+                browseFileButton!!.callOnClick()
             } else {
-                ToastMessage("You should give permission for read storage to continue");
-
+                ToastMessage("You should give permission for read storage to continue")
             }
         } else if (requestCode == BLE_PERMISSIO_REQUSETCODE) {
-            if (Arrays.stream(grantResults).allMatch(x -> x == PackageManager.PERMISSION_GRANTED)) {
-                startOtaButton.callOnClick();
-
+            if (Arrays.stream(grantResults)
+                    .allMatch { x: Int -> x == PackageManager.PERMISSION_GRANTED }
+            ) {
+                startOtaButton!!.callOnClick()
             } else {
-                ToastMessage("You should give Location and Bluetooth to continue");
+                ToastMessage("You should give Location and Bluetooth to continue")
             }
         }
     }
 
+    companion object {
+        private val OTA_CONTROL_CHARACTERISTIC =
+            UUID.fromString("F7BF3564-FB6D-4E53-88A4-5E37E0326063")
+        private val OTA_DATA_CHARACTERISTIC =
+            UUID.fromString("984227F3-34FC-4045-A5D0-2C581F81A153")
+        private val OTA_SERVICE = UUID.fromString("1d14d6ee-fd63-4fa1-bfa4-8f47b42119f0")
+        private const val PICKFILE_REQUESTCODE = 1
+        private const val BLE_PERMISSIO_REQUSETCODE = 3
+        private const val READ_EXTERNAL_STORAGE_REQUESTCODE = 2
+        private const val CONNECT_TIMEOUT: Long = 10000
+    }
 }
